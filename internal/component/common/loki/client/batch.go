@@ -34,6 +34,8 @@ type sentDataTracker interface {
 // streams for each tenant are stored in a dedicated batch.
 type batch struct {
 	streams map[string]*push.Stream
+	// keys memoizes the stream key of label sets seen in this batch, see labelsKey.
+	keys map[model.Fingerprint]labelsKey
 	// created stores per-entry creation timestamps in unix micro seconds for latency observation.
 	created []int64
 	// createdAt is when the batch was created.
@@ -52,9 +54,17 @@ type batch struct {
 	segmentCounter map[int]int
 }
 
+// labelsKey is a stream key, see labelsMapToString, and the label set it was
+// built from. labels is nil until the key is memoized.
+type labelsKey struct {
+	labels model.LabelSet
+	key    string
+}
+
 func newBatch(maxStreams, maxSize int) *batch {
 	return &batch{
 		streams:        make(map[string]*push.Stream),
+		keys:           make(map[model.Fingerprint]labelsKey),
 		createdAt:      time.Now(),
 		maxSize:        maxSize,
 		maxStreams:     maxStreams,
@@ -65,10 +75,11 @@ func newBatch(maxStreams, maxSize int) *batch {
 // add adds an entry to the batch. It returns errBatchSizeReached when
 // entry cannot be added because it would exceed maxSize and
 // errMaxStreamsLimitExceeded when adding a new stream would exceed maxStreams.
+// fp must be the fingerprint of entry.Labels.
 // segmentNum associates the entry with a WAL segment and is unused for non-WAL clients.
-func (b *batch) add(entry loki.Entry, segmentNum int) error {
+func (b *batch) add(entry loki.Entry, fp model.Fingerprint, segmentNum int) error {
 	entrySize := entry.Size()
-	labels := labelsMapToString(entry.Labels)
+	labels := b.labelsKey(entry.Labels, fp)
 	labelsSize := len(labels)
 
 	stream, ok := b.streams[labels]
@@ -116,6 +127,32 @@ func (b *batch) add(entry loki.Entry, segmentNum int) error {
 		Entries: []push.Entry{entry.Entry},
 	}
 	return nil
+}
+
+// labelsKey returns the stream key for ls, where fp is the fingerprint of ls.
+// The key is memoized by fingerprint once a stream has received a second entry
+// in this batch, so it is built at most twice per stream instead of once per
+// entry, while streams with a single entry only pay for the map entry. A
+// memoized key is only reused when the label sets are equal, so a fingerprint
+// collision falls back to building the key.
+func (b *batch) labelsKey(ls model.LabelSet, fp model.Fingerprint) string {
+	k, seen := b.keys[fp]
+	if k.labels != nil {
+		if k.labels.Equal(ls) {
+			return k.key
+		}
+		return labelsMapToString(ls)
+	}
+
+	key := labelsMapToString(ls)
+	if !seen {
+		b.keys[fp] = labelsKey{key: key}
+	} else if k.key == key {
+		// Clone so that later changes to ls by the caller cannot make the
+		// memoized labels and key disagree.
+		b.keys[fp] = labelsKey{labels: ls.Clone(), key: key}
+	}
+	return key
 }
 
 // canAdd reports whether adding size bytes would exceed the batch's maxSize.

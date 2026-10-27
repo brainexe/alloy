@@ -36,27 +36,27 @@ func TestQueue_append(t *testing.T) {
 
 	// add 2 entries to the queue
 	for range 2 {
-		queued := q.append("tenant-1", entry, 0)
+		queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 		assert.True(t, queued)
 	}
 	assert.Equal(t, twoEntriesSize, q.batches["tenant-1"].size)
 
 	// add two more entries, the current batch should be queued and a new batch should be created.
 	for range 2 {
-		queued := q.append("tenant-1", entry, 0)
+		queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 		assert.True(t, queued)
 	}
 	assert.Equal(t, twoEntriesSize, q.batches["tenant-1"].size)
 
 	// adding one more should fail because both queue and batch is full
-	queued := q.append("tenant-1", entry, 0)
+	queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 	assert.False(t, queued)
 
 	// dequeue current batch.
 	<-q.channel()
 
 	// add batch again.
-	queued = q.append("tenant-1", entry, 0)
+	queued = q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 	assert.True(t, queued)
 	assert.Equal(t, oneEntrySize, q.batches["tenant-1"].size)
 }
@@ -70,7 +70,7 @@ func TestQueue_drain(t *testing.T) {
 
 		// fill up queue and current batch
 		for range 4 {
-			queued := q.append("tenant-1", entry, 0)
+			queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 			assert.True(t, queued)
 		}
 		assert.Equal(t, q.batches["tenant-1"].size, twoEntriesSize)
@@ -89,7 +89,7 @@ func TestQueue_drain(t *testing.T) {
 
 		// fill up queue and current batch
 		for range 4 {
-			queued := q.append("tenant-1", entry, 0)
+			queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 			assert.True(t, queued)
 		}
 		assert.Equal(t, q.batches["tenant-1"].size, twoEntriesSize)
@@ -109,7 +109,7 @@ func TestQueue_flushAndShutdown(t *testing.T) {
 
 		// fill current batch but don't queue it.
 		for range 2 {
-			queued := q.append("tenant-1", entry, 0)
+			queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 			assert.True(t, queued)
 		}
 		assert.Equal(t, q.batches["tenant-1"].size, twoEntriesSize)
@@ -144,7 +144,7 @@ func TestQueue_flushAndShutdown(t *testing.T) {
 
 		// fill current batch but don't queue it.
 		for range 4 {
-			queued := q.append("tenant-1", entry, 0)
+			queued := q.append("tenant-1", entry, entry.Labels.FastFingerprint(), 0)
 			assert.True(t, queued)
 		}
 

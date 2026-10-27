@@ -57,7 +57,7 @@ func TestEncode(t *testing.T) {
 			maxSize := int(1 * units.MiB)
 			b := newBatch(0, maxSize)
 			for _, e := range tt.entries {
-				require.NoError(t, b.add(e, 0))
+				require.NoError(t, b.add(e, e.Labels.FastFingerprint(), 0))
 			}
 
 			r, entries := b.request()
@@ -76,7 +76,7 @@ func TestEncode(t *testing.T) {
 
 func TestEncodeSmallBuffers(t *testing.T) {
 	b := newBatch(0, int(1*units.MiB))
-	require.NoError(t, b.add(loki.Entry{}, 0))
+	require.NoError(t, b.add(loki.Entry{}, 0, 0))
 
 	r, entries := b.request()
 	require.Equal(t, 1, entries)
@@ -96,7 +96,7 @@ func BenchmarkBatch_Encode(b *testing.B) {
 			Labels: model.LabelSet{"stream": model.LabelValue(fmt.Sprintf("s%d", i))},
 			Entry:  push.Entry{Timestamp: time.Now(), Line: "log line"},
 		}
-		err := batch.add(entry, 0)
+		err := batch.add(entry, entry.Labels.FastFingerprint(), 0)
 		require.NoError(b, err)
 	}
 

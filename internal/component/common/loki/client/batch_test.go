@@ -28,7 +28,7 @@ func TestBatch_MaxStreams(t *testing.T) {
 
 	errCount := 0
 	for _, entry := range inputEntries {
-		err := b.add(entry, 0)
+		err := b.add(entry, entry.Labels.FastFingerprint(), 0)
 		if err != nil {
 			errCount++
 			assert.ErrorIs(t, err, errMaxStreamsLimitExceeded)
@@ -40,8 +40,8 @@ func TestBatch_MaxStreams(t *testing.T) {
 func TestBatch_MaxSize(t *testing.T) {
 	entry := loki.Entry{Labels: model.LabelSet{"app": "app-1"}, Entry: push.Entry{Timestamp: time.Unix(4, 0).UTC(), Line: "line4"}}
 	b := newBatch(0, 1)
-	require.NoError(t, b.add(entry, 0))
-	require.ErrorIs(t, b.add(entry, 0), errBatchSizeReached)
+	require.NoError(t, b.add(entry, entry.Labels.FastFingerprint(), 0))
+	require.ErrorIs(t, b.add(entry, entry.Labels.FastFingerprint(), 0), errBatchSizeReached)
 }
 
 // labelSetSize returns the size, in bytes, that a stream with these labels
@@ -104,7 +104,7 @@ func TestBatch_add(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			b := newBatch(0, int(1*units.MiB))
 			for _, entry := range tt.entries {
-				err := b.add(entry, 0)
+				err := b.add(entry, entry.Labels.FastFingerprint(), 0)
 				assert.NoError(t, err)
 			}
 
@@ -125,9 +125,11 @@ func TestBatchHashCollisions(t *testing.T) {
 	const entriesPerLabel = 10
 
 	for i := range entriesPerLabel {
-		_ = b.add(loki.Entry{Labels: ls1, Entry: push.Entry{Timestamp: time.Now(), Line: fmt.Sprintf("line %d", i)}}, 0)
+		e1 := loki.Entry{Labels: ls1, Entry: push.Entry{Timestamp: time.Now(), Line: fmt.Sprintf("line %d", i)}}
+		_ = b.add(e1, ls1.FastFingerprint(), 0)
 
-		_ = b.add(loki.Entry{Labels: ls2, Entry: push.Entry{Timestamp: time.Now(), Line: fmt.Sprintf("line %d", i)}}, 0)
+		e2 := loki.Entry{Labels: ls2, Entry: push.Entry{Timestamp: time.Now(), Line: fmt.Sprintf("line %d", i)}}
+		_ = b.add(e2, ls2.FastFingerprint(), 0)
 	}
 
 	// make sure that colliding labels are stored properly as independent streams
@@ -142,6 +144,58 @@ func TestBatchHashCollisions(t *testing.T) {
 		assert.Equal(t, ls2.String(), req.Streams[0].Labels)
 		assert.Equal(t, ls1.String(), req.Streams[1].Labels)
 	}
+
+	// Only the first label set is memoized for the shared fingerprint.
+	require.Len(t, b.keys, 1)
+	assert.True(t, b.keys[ls1.FastFingerprint()].labels.Equal(ls1))
+}
+
+func TestBatch_LabelsKeyMemoized(t *testing.T) {
+	b := newBatch(0, int(1*units.MiB))
+
+	add := func(ls model.LabelSet) {
+		t.Helper()
+		entry := loki.Entry{Labels: ls, Entry: push.Entry{Timestamp: time.Now(), Line: "line"}}
+		require.NoError(t, b.add(entry, ls.FastFingerprint(), 0))
+	}
+
+	ls := model.LabelSet{"app": "l", "level": "info"}
+	fp := ls.FastFingerprint()
+
+	// The first entry of a stream only records the key.
+	add(ls)
+	require.Len(t, b.streams, 1)
+	require.Len(t, b.keys, 1)
+	assert.Nil(t, b.keys[fp].labels)
+	assert.Equal(t, labelsMapToString(ls), b.keys[fp].key)
+
+	// The second entry with equal labels memoizes the labels, later entries reuse the key.
+	add(ls.Clone())
+	assert.True(t, b.keys[fp].labels.Equal(ls))
+	add(ls.Clone())
+	require.Len(t, b.streams, 1)
+	require.Len(t, b.keys, 1)
+
+	// Internal labels are not part of the key, so the entries end up in the
+	// same stream through a separate memo entry.
+	withInternal := ls.Clone()
+	withInternal["__internal"] = "x"
+	add(withInternal)
+	add(withInternal)
+	require.Len(t, b.streams, 1)
+	require.Len(t, b.keys, 2)
+	assert.Equal(t, b.keys[fp].key, b.keys[withInternal.FastFingerprint()].key)
+
+	// Changing a label set after it was added must not change the memoized labels.
+	ls["level"] = "error"
+	add(ls)
+	require.Len(t, b.streams, 2)
+	require.Len(t, b.keys, 3)
+	assert.Equal(t, model.LabelValue("info"), b.keys[fp].labels["level"])
+
+	req, entries := b.request()
+	assert.Len(t, req.Streams, 2)
+	assert.Equal(t, 6, entries)
 }
 
 func BenchmarkBatch_Add(b *testing.B) {
@@ -154,15 +208,27 @@ func BenchmarkBatch_Add(b *testing.B) {
 		}
 	}
 
+	fingerprints := fingerprintsOf(entries)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
 		batch := newBatch(0, maxSize)
 		for i := range 64 {
-			_ = batch.add(entries[i%64], 0)
+			_ = batch.add(entries[i%64], fingerprints[i%64], 0)
 		}
 	}
+}
+
+// fingerprintsOf returns the fingerprint of each entry's labels, as computed
+// by shards.enqueue before an entry is added to a batch.
+func fingerprintsOf(entries []loki.Entry) []model.Fingerprint {
+	fingerprints := make([]model.Fingerprint, len(entries))
+	for i, e := range entries {
+		fingerprints[i] = e.Labels.FastFingerprint()
+	}
+	return fingerprints
 }
 
 // BenchmarkBatch_AddManyLabels adds entries that cycle through a few streams
@@ -177,13 +243,15 @@ func BenchmarkBatch_AddManyLabels(b *testing.B) {
 		}
 	}
 
+	fingerprints := fingerprintsOf(entries)
+
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for b.Loop() {
 		batch := newBatch(0, maxSize)
 		for i := range 1000 {
-			_ = batch.add(entries[i%len(entries)], 0)
+			_ = batch.add(entries[i%len(entries)], fingerprints[i%len(entries)], 0)
 		}
 	}
 }

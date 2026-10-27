@@ -16,6 +16,7 @@ import (
 	"github.com/golang/snappy"
 	"github.com/grafana/dskit/backoff"
 	"github.com/prometheus/common/config"
+	"github.com/prometheus/common/model"
 	"go.uber.org/atomic"
 
 	"github.com/grafana/alloy/internal/component/common/loki"
@@ -68,11 +69,12 @@ type queue struct {
 	batches map[string]*batch
 }
 
-// append adds a log entry to the queue for the given tenant.
+// append adds a log entry to the queue for the given tenant. fp must be the
+// fingerprint of entry.Labels.
 // It returns true if the caller should not apply backpressure,
 // entry was queued or it was dropped due to max streams reached.
 // It returns false if the queue is full and backpressure should be applied.
-func (q *queue) append(tenantID string, entry loki.Entry, segmentNum int) bool {
+func (q *queue) append(tenantID string, entry loki.Entry, fp model.Fingerprint, segmentNum int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -80,12 +82,12 @@ func (q *queue) append(tenantID string, entry loki.Entry, segmentNum int) bool {
 	if !ok {
 		// Create a new batch for this tenant.
 		batch := newBatch(q.cfg.MaxStreams, q.cfg.BatchSize)
-		_ = batch.add(entry, segmentNum)
+		_ = batch.add(entry, fp, segmentNum)
 		q.batches[tenantID] = batch
 		return true
 	}
 
-	if err := batch.add(entry, segmentNum); err != nil {
+	if err := batch.add(entry, fp, segmentNum); err != nil {
 		// If adding this entry would exceed the batch size limit, enqueue the
 		// current batch and start a new one.
 		if errors.Is(err, errBatchSizeReached) {
@@ -98,7 +100,7 @@ func (q *queue) append(tenantID string, entry loki.Entry, segmentNum int) bool {
 			}
 
 			batch := newBatch(q.cfg.MaxStreams, q.cfg.BatchSize)
-			_ = batch.add(entry, segmentNum)
+			_ = batch.add(entry, fp, segmentNum)
 			q.batches[tenantID] = batch
 			return true
 		}
@@ -399,7 +401,7 @@ func (s *shards) enqueue(tenantID string, entry loki.Entry, segmentNum int) erro
 	fingerprint := entry.Labels.FastFingerprint()
 	shard := uint64(fingerprint) % uint64(len(s.queues))
 
-	if !s.queues[shard].append(tenantID, entry, segmentNum) {
+	if !s.queues[shard].append(tenantID, entry, fingerprint, segmentNum) {
 		return errQueueIsFull
 	}
 	return nil
