@@ -165,6 +165,50 @@ func BenchmarkBatch_Add(b *testing.B) {
 	}
 }
 
+// BenchmarkBatch_AddManyLabels adds entries that cycle through a few streams
+// with many labels, which is the common case when external labels are set.
+func BenchmarkBatch_AddManyLabels(b *testing.B) {
+	const maxSize = 1 << 20
+	entries := make([]loki.Entry, 4)
+	for i := range entries {
+		entries[i] = loki.Entry{
+			Labels: manyLabels(i),
+			Entry:  push.Entry{Timestamp: time.Now(), Line: "log line"},
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		batch := newBatch(0, maxSize)
+		for i := range 1000 {
+			_ = batch.add(entries[i%len(entries)], 0)
+		}
+	}
+}
+
+// manyLabels returns a label set with 13 shared labels and two that depend on i.
+func manyLabels(i int) model.LabelSet {
+	return model.LabelSet{
+		"hostname":     "host-1.example.com",
+		"project":      "project",
+		"function":     "app",
+		"environment":  "production",
+		"subproject":   "",
+		"region":       "eu",
+		"cluster":      "1",
+		"tier":         "",
+		"company":      "example",
+		"team":         "",
+		"instance":     "2",
+		"service_name": "service",
+		"filename":     "/var/log/app/application-json.log",
+		"unit":         model.LabelValue(fmt.Sprintf("unit-%d", i%2)),
+		"level":        model.LabelValue(fmt.Sprintf("level-%d", i)),
+	}
+}
+
 // store the result to a package level variable
 // so the compiler cannot eliminate the Benchmark itself.
 var result string
@@ -176,12 +220,20 @@ func BenchmarkLabelsMapToString(b *testing.B) {
 	labelSet["label2"] = "value3"
 	labelSet["__tenant_id__"] = "another_value"
 
-	var r string
-	for b.Loop() {
-		// store in r prevent the compiler eliminating the function call.
-		r = labelsMapToString(labelSet)
+	for name, ls := range map[string]model.LabelSet{
+		"few_labels":  labelSet,
+		"many_labels": manyLabels(0),
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			var r string
+			for b.Loop() {
+				// store in r prevent the compiler eliminating the function call.
+				r = labelsMapToString(ls)
+			}
+			result = r
+		})
 	}
-	result = r
 }
 
 func TestLabelsMapToString(t *testing.T) {
